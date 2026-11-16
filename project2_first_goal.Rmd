@@ -1,0 +1,570 @@
+---
+title: "How Long Does It Take for the First Goal to Be Scored?"
+subtitle: "AUA CS 108 Statistics, Fall 2026 - Project 2 (Steps 1-5)"
+author: "Group members: (add names here)"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 7, fig.height = 4.5, fig.align = "center")
+set.seed(2026)   # fixed seed for all simulations (reproducibility requirement)
+```
+
+```{r settings}
+# ---- Global settings: change them here only -------------------------------
+DATA_FILE   <- "football_charts_matches.csv"
+LEAGUE_CODE <- "premier"   # English Premier League (column 'league').
+                           # NOTE: the column 'league_name' == "Premier League" is
+                           # used by 5 different countries, so filter by 'league'.
+C_MAX       <- 90          # observation window (minutes): regulation time
+B_SIM       <- 2000        # simulation replications for Step 5.3
+                           # (use >= 5000 for the coverage study in Step 6)
+```
+
+# Problem description (Step 1)
+
+**Practical question.** In a football match, after how many minutes is the first goal scored, and how likely is a match to have no goal at all?
+Is the "goal-scoring clock" memoryless (a constant scoring rate), or does the scoring rate grow as the match goes on?
+
+**Parameters of interest.** Let $T$ be the time (in minutes) of the first goal.
+We model $T$ by a Weibull distribution with shape $k$ and scale $\lambda$. We want to estimate:
+
+* the shape $k$ (is $k=1$, i.e. a constant scoring rate, or $k>1$, i.e. an increasing rate?);
+* the scale $\lambda$ (a time scale, in minutes);
+* the median time to the first goal, $m=\lambda(\ln 2)^{1/k}$;
+* the probability of a goal-less match in regulation time, $p_0=P(T>C)=\exp\{-(C/\lambda)^k\}$ with $C=90$;
+* the mean time to the first goal, $E[T]=\lambda\Gamma(1+1/k)$.
+
+**Data-generating mechanism and assumptions.**
+
+* One observation is one match. We assume that the matches are independent and identically distributed (i.i.d.) draws from the same Weibull model. This is an approximation: teams play several matches, and the strength of the teams differs. We discuss it in the limitations.
+* **Right censoring.** We only observe the match for $C=90$ minutes. If no goal is scored in the window, we only know $T>C$. So we observe the pair $(Y_i,\delta_i)$ with $Y_i=\min(T_i,C)$ and $\delta_i=\mathbf 1\{T_i\le C\}$. This is the "censored lifetime" structure.
+* The recorded times are integer minutes. We treat them as continuous (see limitations).
+
+# Model (Step 2)
+
+## The Weibull model
+
+For $T\sim\text{Weibull}(k,\lambda)$, $k>0$, $\lambda>0$, support $t>0$:
+
+$$f(t)=\frac{k}{\lambda}\left(\frac t\lambda\right)^{k-1}e^{-(t/\lambda)^k},\qquad
+S(t)=P(T>t)=e^{-(t/\lambda)^k},\qquad h(t)=\frac{k}{\lambda}\left(\frac t\lambda\right)^{k-1}.$$
+
+$$E[T]=\lambda\,\Gamma\!\left(1+\tfrac1k\right),\qquad
+\text{Var}(T)=\lambda^2\left[\Gamma\!\left(1+\tfrac2k\right)-\Gamma^2\!\left(1+\tfrac1k\right)\right],\qquad
+\text{median}=\lambda(\ln2)^{1/k}.$$
+
+**Why Weibull?** $T$ is a waiting time until an event, so it is positive and right-skewed. The hazard $h(t)$ is the instantaneous scoring rate. For $k=1$ the hazard is constant (the exponential case, no memory). For $k>1$ the rate increases with time, which is plausible in football (tired defences, more risk-taking, substitutions). For $k<1$ it decreases. So the single parameter $k$ answers the question "does the scoring rate change during the match?".
+
+**Competing models.** We compare it with the **gamma** and **log-normal** distributions, and with the **exponential** (the special case $k=1$) as a nested submodel. All of them are fitted by maximum likelihood with censoring, and compared by AIC/BIC and graphically in Step 4. The rest of the project uses the model that wins (expected: Weibull).
+
+# Dataset (Step 3)
+
+## Description
+
+* **Source:** file `football_charts_matches.csv`. *(TODO: add the original source and link/reference here.)*
+* **One observation:** one football match.
+* **Population:** matches of 92 leagues in 42 countries, seasons 2023-2024 to 2025-2026 (some leagues use calendar-year seasons).
+* **Variables used:** `first_goal_time` (minute of the first goal, in minutes), `total_goals` (number of goals in the match), `league`, `season`.
+* **Our subset:** the English Premier League (`league == "premier"`), 3 seasons. Using one league reduces the heterogeneity between leagues.
+
+```{r load}
+raw <- read.csv(DATA_FILE, stringsAsFactors = FALSE)
+str(raw)
+cat("Rows:", nrow(raw), " Leagues:", length(unique(raw$league)),
+    " Countries:", length(unique(raw$country)), "\n")
+```
+
+## Data preparation and audit
+
+We do **not** modify anything silently. The audit below lists every issue in the selected subset, and then the exact rules we apply.
+
+```{r audit}
+sub <- raw[raw$league == LEAGUE_CODE & grepl("-", raw$season), ]
+
+# first goal time implied by all_goal_times (when it can be parsed)
+first_from_list <- suppressWarnings(as.numeric(sub("^([0-9.]+).*$", "\\1", sub$all_goal_times)))
+
+audit <- data.frame(
+  check = c(
+    "Matches in subset",
+    "Duplicated matches (same season, date, teams)",
+    "Missing kickoff time",
+    "0-0 matches (first_goal_time is NA): treated as censored",
+    "Matches with goals > 0 but first_goal_time missing",
+    "Matches with 0 goals but a first_goal_time",
+    "First goal after minute C_MAX (stoppage time): treated as censored at C_MAX",
+    "Non-integer first_goal_time",
+    "all_goal_times marked 'Not found'",
+    "first_goal_time differs from first element of all_goal_times"),
+  count = c(
+    nrow(sub),
+    sum(duplicated(sub[, c("season", "match_date", "home_team", "away_team")])),
+    sum(is.na(sub$time)),
+    sum(sub$total_goals == 0 & is.na(sub$first_goal_time)),
+    sum(sub$total_goals > 0 & is.na(sub$first_goal_time)),
+    sum(sub$total_goals == 0 & !is.na(sub$first_goal_time)),
+    sum(sub$first_goal_time > C_MAX, na.rm = TRUE),
+    sum(sub$first_goal_time %% 1 != 0, na.rm = TRUE),
+    sum(sub$all_goal_times == "Not found", na.rm = TRUE),
+    sum(!is.na(first_from_list) & !is.na(sub$first_goal_time) &
+          first_from_list != sub$first_goal_time)))
+knitr::kable(audit)
+```
+
+**Rules applied (and why).**
+
+1. A match with `total_goals == 0` has `first_goal_time = NA` because no goal happened. This is not a missing value: it is a **right-censored** observation, $Y=C$, $\delta=0$.
+2. A match with goals but no recorded time would be a genuine missing value, so it is dropped (the count is in the audit; in the Premier League it is expected to be 0).
+3. A first goal after minute $C=90$ (stoppage time) is treated as censored at $C$ ($Y=C,\ \delta=0$). Otherwise a match with a goal at minute 92 would be an event at 92, while a 0-0 match, which also lasts about 95 minutes, would be cut at 90. Rule 3 makes the window the same for every match. The estimand is "time to the first goal **within regulation time**".
+4. If a match appears twice (same season, date and teams), the second copy is removed. The number of such rows is reported in the audit above.
+
+```{r make-data}
+make_data <- function(df, C) {
+  df <- df[!duplicated(df[, c("season", "match_date", "home_team", "away_team")]), ]
+  df <- df[df$total_goals == 0 | !is.na(df$first_goal_time), ]   # rule 2
+  ev <- df$total_goals > 0 & df$first_goal_time <= C
+  ev[is.na(ev)] <- FALSE                                         # 0-0 matches
+  data.frame(t = ifelse(ev, df$first_goal_time, C),
+             delta = as.integer(ev),
+             season = df$season, home = df$home_team, away = df$away_team,
+             date = df$match_date)
+}
+dat <- make_data(sub, C_MAX)
+n <- nrow(dat); d <- sum(dat$delta)
+cat("n =", n, " observed first goals d =", d,
+    " censored =", n - d, sprintf("(%.1f%%)\n", 100 * (n - d) / n))
+summary(dat$t[dat$delta == 1])
+```
+
+**Check of the i.i.d. assumption.** Matches are not a time series in the usual sense, but the same teams repeat, and a team's attacking strength is persistent. We look at the stability across seasons in Step 5 and discuss the effect in the limitations.
+
+**Rounding/heaping of the minutes.** The first goal times are integer minutes, and the stoppage-time goals of the first half are recorded as minutes 46, 47, ... (pooled over all leagues):
+
+```{r heaping, fig.height=3.5}
+x <- raw$first_goal_time[!is.na(raw$first_goal_time)]
+tab <- tabulate(ceiling(x[x <= 100]), nbins = 100)
+barplot(tab, names.arg = 1:100, xlab = "minute of the first goal", ylab = "matches",
+        main = "Recorded minute of the first goal (all leagues)", border = NA)
+abline(v = 0.2 + 1.2 * 45, lty = 2)
+```
+
+The bump after minute 45 is first-half stoppage time. It is a measurement artefact: we mention it in the limitations.
+
+# Likelihoods, fitting and model comparison (Steps 2 and 4)
+
+With observations $(y_i,\delta_i)$, the likelihood for a distribution with density $f$ and survival function $S$ is
+
+$$L(\theta)=\prod_{i=1}^n f(y_i;\theta)^{\delta_i}\,S(y_i;\theta)^{1-\delta_i}.$$
+
+Events contribute through the density, censored matches through the survival function.
+
+```{r likelihoods}
+# All parameters are on the log scale (eta) to keep them positive and the optimisation stable.
+nll_weibull <- function(eta, t, delta) {
+  k <- exp(eta[1]); lam <- exp(eta[2])
+  -(sum(delta * (log(k) - log(lam) + (k - 1) * (log(t) - log(lam)))) - sum((t / lam)^k))
+}
+nll_exp <- function(eta, t, delta) {            # exponential: S(t)=exp(-t/lambda)
+  lam <- exp(eta[1])
+  -(-sum(delta) * log(lam) - sum(t) / lam)
+}
+nll_gamma <- function(eta, t, delta) {          # shape a, rate b
+  a <- exp(eta[1]); b <- exp(eta[2])
+  -(sum(delta * dgamma(t, a, b, log = TRUE)) +
+      sum((1 - delta) * pgamma(t, a, b, lower.tail = FALSE, log.p = TRUE)))
+}
+nll_lnorm <- function(eta, t, delta) {          # meanlog mu, sdlog sigma
+  mu <- eta[1]; s <- exp(eta[2])
+  -(sum(delta * dlnorm(t, mu, s, log = TRUE)) +
+      sum((1 - delta) * plnorm(t, mu, s, lower.tail = FALSE, log.p = TRUE)))
+}
+
+ev_t <- dat$t[dat$delta == 1]
+fit_w <- optim(c(0, log(mean(dat$t))), nll_weibull, t = dat$t, delta = dat$delta,
+               method = "BFGS", control = list(reltol = 1e-12, maxit = 1000))
+fit_e <- optim(log(mean(dat$t)), nll_exp, t = dat$t, delta = dat$delta,
+               method = "BFGS", control = list(reltol = 1e-12))
+m <- mean(ev_t); v <- var(ev_t)
+fit_g <- optim(log(c(m^2 / v, m / v)), nll_gamma, t = dat$t, delta = dat$delta,
+               method = "BFGS", control = list(reltol = 1e-12, maxit = 1000))
+fit_l <- optim(c(mean(log(ev_t)), log(sd(log(ev_t)))), nll_lnorm, t = dat$t, delta = dat$delta,
+               method = "BFGS", control = list(reltol = 1e-12, maxit = 1000))
+
+comp <- data.frame(
+  model  = c("Exponential", "Weibull", "Gamma", "Log-normal"),
+  params = c(1, 2, 2, 2),
+  logLik = -c(fit_e$value, fit_w$value, fit_g$value, fit_l$value))
+comp$AIC <- -2 * comp$logLik + 2 * comp$params
+comp$BIC <- -2 * comp$logLik + log(n) * comp$params
+comp$dAIC <- comp$AIC - min(comp$AIC)
+knitr::kable(comp, digits = 2)
+```
+
+**How to read it.** A smaller AIC/BIC is better (AIC = $-2\ell+2p$ penalises the number of parameters $p$). Differences of AIC smaller than about 2 mean that the models are practically equivalent.
+
+# Relevance of the model to the data (Step 4)
+
+```{r fitted-values}
+k_w <- exp(fit_w$par[1]); lam_w <- exp(fit_w$par[2])
+lam_e <- exp(fit_e$par)
+a_g <- exp(fit_g$par[1]); b_g <- exp(fit_g$par[2])
+mu_l <- fit_l$par[1]; s_l <- exp(fit_l$par[2])
+
+# Kaplan-Meier estimator (handles ties; events are placed before censorings at the same time)
+km <- function(t, delta) {
+  o <- order(t, -delta); ts <- t[o]; ds <- delta[o]
+  N <- length(ts)
+  S <- cumprod(1 - ds / (N - seq_len(N) + 1))
+  keep <- ds == 1 & !duplicated(ts, fromLast = TRUE)
+  data.frame(time = ts[keep], surv = S[keep])
+}
+km_dat <- km(dat$t, dat$delta)
+```
+
+## Graphical methods
+
+**(a) Kaplan-Meier survival curve against the fitted survival functions.** The Kaplan-Meier estimate is the nonparametric estimate of $S(t)=P(T>t)$, valid with censoring. If the model is good, its curve follows the KM curve.
+
+```{r km-plot}
+tt <- seq(0, C_MAX, length.out = 300)
+plot(c(0, km_dat$time), c(1, km_dat$surv), type = "s", lwd = 2,
+     xlab = "minutes", ylab = "P(no goal yet)", ylim = c(0, 1),
+     main = "Kaplan-Meier estimate and fitted survival functions")
+lines(tt, exp(-(tt / lam_w)^k_w), col = "red", lwd = 2)
+lines(tt, pgamma(tt, a_g, b_g, lower.tail = FALSE), col = "blue", lwd = 2, lty = 2)
+lines(tt, plnorm(tt, mu_l, s_l, lower.tail = FALSE), col = "darkgreen", lwd = 2, lty = 3)
+lines(tt, exp(-tt / lam_e), col = "orange", lwd = 2, lty = 4)
+legend("topright", c("Kaplan-Meier", "Weibull", "Gamma", "Log-normal", "Exponential"),
+       col = c("black", "red", "blue", "darkgreen", "orange"), lwd = 2, lty = c(1, 1, 2, 3, 4))
+```
+
+**(b) Observed counts against the counts expected under the Weibull model** (the histogram analogue for censored data). In each 5-minute bin, the expected number of first goals is $n\,[F(b_j)-F(b_{j-1})]$. The last bar is "no goal in the window".
+
+```{r hist-plot}
+brk <- sort(unique(c(seq(0, C_MAX, by = 5), C_MAX)))
+obs <- as.vector(table(cut(ev_t, brk, include.lowest = TRUE)))
+Fw  <- pweibull(brk, k_w, lam_w)
+exp_ev <- n * diff(Fw)
+obs_all <- c(obs, n - d)
+exp_all <- c(exp_ev, n * (1 - Fw[length(Fw)]))
+lab <- c(paste0(brk[-length(brk)], "-", brk[-1]), "none")
+bp <- barplot(obs_all, names.arg = lab, las = 2, cex.names = 0.7,
+              ylab = "matches", main = "Observed (bars) vs Weibull-expected (red) counts")
+points(bp, exp_all, col = "red", pch = 19, type = "b")
+```
+
+**(c) Weibull plot.** Since $\log\{-\log S(t)\}=k\log t-k\log\lambda$, the points $(\log t,\ \log\{-\log\hat S_{KM}(t)\})$ should lie on a straight line with slope $k$ if the Weibull model is correct.
+
+```{r weibull-plot}
+ok <- km_dat$surv > 0 & km_dat$surv < 1
+plot(log(km_dat$time[ok]), log(-log(km_dat$surv[ok])), pch = 16, cex = 0.7,
+     xlab = "log(minutes)", ylab = "log(-log(S_KM))", main = "Weibull plot")
+abline(a = -k_w * log(lam_w), b = k_w, col = "red", lwd = 2)
+```
+
+**(d) QQ plot.** With censoring, the plain QQ plot uses only the observed first goals $y_{(1)}\le\dots\le y_{(d)}$. Those are draws from the Weibull distribution **truncated to $[0,C]$**, whose quantile function is $F^{-1}(u\,F(C))$. So we plot the observed times against these quantiles at $u_i=(i-0.5)/d$.
+
+```{r qq-plot}
+u <- (seq_len(d) - 0.5) / d
+q_theo <- qweibull(u * pweibull(C_MAX, k_w, lam_w), k_w, lam_w)
+plot(q_theo, sort(ev_t), pch = 16, cex = 0.6,
+     xlab = "theoretical quantiles (truncated Weibull)", ylab = "observed first-goal minutes",
+     main = "QQ plot (observed first goals only)")
+abline(0, 1, col = "red", lwd = 2)
+```
+
+The horizontal "steps" are caused by the integer minutes.
+
+## Formal tests (optional, they complement the plots)
+
+**Chi-square goodness-of-fit test on the bins of plot (b).**
+
+* $H_0$: the data come from the fitted Weibull (with censoring); $H_1$: they do not.
+* Statistic: $X^2=\sum_j (O_j-E_j)^2/E_j$ over the $m$ bins (including the "no goal" bin).
+* Under $H_0$ it is approximately $\chi^2$. Because the parameters were estimated from the ungrouped data, its null distribution lies between $\chi^2_{m-1-2}$ and $\chi^2_{m-1}$, so we report both p-values.
+* A small p-value is evidence against the model. A large p-value only says that we found no evidence against it. With a large $n$, a small p-value can also come from a practically irrelevant deviation.
+
+```{r chisq}
+X2 <- sum((obs_all - exp_all)^2 / exp_all); mbin <- length(obs_all)
+data.frame(X2 = X2, bins = mbin,
+           p_df_m_minus_3 = pchisq(X2, mbin - 3, lower.tail = FALSE),
+           p_df_m_minus_1 = pchisq(X2, mbin - 1, lower.tail = FALSE),
+           min_expected = min(exp_all))
+```
+
+**Likelihood-ratio test of $H_0:k=1$ (exponential) against $H_1$: Weibull.**
+The models are nested. The statistic is $2(\ell_{Weibull}-\ell_{exp})\overset{H_0}{\approx}\chi^2_1$.
+
+```{r lrt}
+LR <- 2 * (-fit_w$value + fit_e$value)
+data.frame(LR = LR, p_value = pchisq(LR, 1, lower.tail = FALSE))
+```
+
+**Stability across seasons** (a rough check of the i.i.d. assumption) uses the estimator derived in the next section, so the table is given there (chunk `by-season`).
+
+# Estimators and their properties (Step 5)
+
+## Construction of the estimators
+
+### Maximum likelihood estimator (MLE)
+
+The log-likelihood of the Weibull model with censoring, with $d=\sum\delta_i$ the number of observed first goals, is
+
+$$\ell(k,\lambda)=d\log k-dk\log\lambda+(k-1)\sum_i\delta_i\log y_i-\lambda^{-k}\sum_i y_i^k .$$
+
+*Derivation.* For an event, $\log f(y)=\log k-\log\lambda+(k-1)\log(y/\lambda)-(y/\lambda)^k$. For a censored match, $\log S(y)=-(y/\lambda)^k$. Summing over all matches (events with weight $\delta_i$, all matches for the $-(y/\lambda)^k$ term) gives the formula.
+
+**Score equation for $\lambda$.** $\ \partial\ell/\partial\lambda=-dk/\lambda+k\lambda^{-k-1}\sum y_i^k=0$, so for a fixed $k$
+
+$$\hat\lambda(k)=\left(\frac{\sum_i y_i^k}{d}\right)^{1/k}.$$
+
+**Profile likelihood for $k$.** Substituting $\hat\lambda(k)$ back, $\ell_p(k)=d\log k-d\log\!\big(\sum y_i^k/d\big)+(k-1)\sum\delta_i\log y_i-d$, and $\ell_p'(k)=0$ gives
+
+$$g(k)=\frac1k+\frac{\sum_i\delta_i\log y_i}{d}-\frac{\sum_i y_i^k\log y_i}{\sum_i y_i^k}=0 .$$
+
+This equation has **no closed-form solution**. Properties used for the numerical solution: $g(k)\to+\infty$ as $k\to0^+$, and $g(k)<0$ for large $k$ (the last term tends to $\log\max y_i$, which exceeds the mean log of the observed times). So a root is bracketed, and we solve it by Brent's method (`uniroot`), then compute $\hat\lambda=\hat\lambda(\hat k)$.
+
+```{r mle}
+mle_weibull <- function(t, delta) {
+  d <- sum(delta); slog <- sum(delta * log(t)); tmax <- max(t)
+  g <- function(k) {
+    w <- (t / tmax)^k                      # rescaling avoids overflow; the ratio is unchanged
+    1 / k + slog / d - sum(w * log(t)) / sum(w)
+  }
+  k <- uniroot(g, c(0.01, 50), tol = 1e-12)$root
+  lam <- tmax * (sum((t / tmax)^k) / d)^(1 / k)
+  c(k = k, lambda = lam)
+}
+mle <- mle_weibull(dat$t, dat$delta)
+mle
+```
+
+**Check of the numerical solution.** (i) the score $g(\hat k)$ should be about 0, (ii) the gradient of the log-likelihood should vanish, (iii) the result should coincide with the direct numerical maximisation by `optim` above.
+
+```{r mle-check}
+eta_hat <- log(mle)
+grad <- sapply(1:2, function(j) {
+  e <- c(0, 0); e[j] <- 1e-6
+  -(nll_weibull(eta_hat + e, dat$t, dat$delta) - nll_weibull(eta_hat - e, dat$t, dat$delta)) / 2e-6
+})
+data.frame(source = c("profile + uniroot", "direct optim (BFGS)"),
+           k = c(mle[1], k_w), lambda = c(mle[2], lam_w),
+           max_abs_gradient = c(max(abs(grad)), NA), row.names = NULL)
+```
+
+### Other estimators (for comparison)
+
+**Method of moments (naive, ignores censoring).** For complete data, $\text{CV}^2=\text{Var}(T)/E[T]^2=\Gamma(1+2/k)/\Gamma^2(1+1/k)-1$ depends on $k$ only. We equate it to the sample $s^2/\bar y^2$ of the observed first goals, solve for $\hat k$, and take $\hat\lambda=\bar y/\Gamma(1+1/\hat k)$. This uses only the matches with a goal, so it ignores the censoring: **it is expected to be biased**, and we use the simulation to show how much.
+
+**Weibull-plot (least-squares) estimator.** Regress $\log\{-\log\hat S_{KM}(y)\}$ on $\log y$ over the observed times: the slope estimates $k$ and the intercept estimates $-k\log\lambda$.
+
+```{r other-estimators}
+mom_weibull <- function(t, delta) {
+  y <- t[delta == 1]
+  if (length(y) < 3) return(c(k = NA, lambda = NA))
+  cv2 <- var(y) / mean(y)^2
+  f <- function(k) gamma(1 + 2 / k) / gamma(1 + 1 / k)^2 - 1 - cv2
+  k <- uniroot(f, c(0.05, 100), tol = 1e-10)$root
+  c(k = k, lambda = mean(y) / gamma(1 + 1 / k))
+}
+wp_weibull <- function(t, delta) {
+  kmx <- km(t, delta); kmx <- kmx[kmx$surv > 0 & kmx$surv < 1, ]
+  if (nrow(kmx) < 3) return(c(k = NA, lambda = NA))
+  b <- coef(lm(log(-log(kmx$surv)) ~ log(kmx$time)))
+  c(k = unname(b[2]), lambda = unname(exp(-b[1] / b[2])))
+}
+rbind(MLE = mle, MoM_naive = mom_weibull(dat$t, dat$delta), WeibullPlot = wp_weibull(dat$t, dat$delta))
+```
+
+## Properties of the estimators
+
+**No exact finite-sample formulas.** For the Weibull model with censoring, $\hat k$ and $\hat\lambda$ do not have closed forms, so unbiasedness and the variance cannot be derived exactly. We therefore use (a) the large-sample theory and (b) simulation (Section 5.3).
+
+**Large-sample theory (what we can say analytically).** The model is regular (the support does not depend on the parameters), so the MLE is consistent, asymptotically normal and asymptotically efficient:
+$$\hat\theta\ \approx\ N\big(\theta,\ I_n(\theta)^{-1}\big),\qquad I_n(\theta)=n\,I_1(\theta),$$
+where $I(\theta)=-E[\partial^2\ell/\partial\theta\,\partial\theta^\top]$ is the Fisher information. The Cramer-Rao bound $I_n^{-1}$ is attained asymptotically. We estimate it by the **observed information** $-\partial^2\ell/\partial\theta^\top\partial\theta$ at $\hat\theta$ (numerical Hessian), working on the log-scale $\eta=(\log k,\log\lambda)$, and then use the **delta method** for any function $\phi(\eta)$ of the parameters:
+$$\widehat{\text{se}}(\phi(\hat\eta))=\sqrt{\nabla\phi^\top\,\hat V\,\nabla\phi},\qquad \hat V=\big(-\partial^2\ell/\partial\eta\,\partial\eta^\top\big)^{-1}\big|_{\hat\eta}.$$
+
+```{r delta-method}
+num_jac <- function(f, x, h = 1e-5) {
+  f0 <- f(x); J <- matrix(0, length(f0), length(x))
+  for (j in seq_along(x)) {
+    e <- rep(0, length(x)); e[j] <- h
+    J[, j] <- (f(x + e) - f(x - e)) / (2 * h)
+  }
+  J
+}
+# quantities of interest as functions of eta = (log k, log lambda)
+g_fun <- function(eta, C) {
+  k <- exp(eta[1]); lam <- exp(eta[2])
+  c(k = k, lambda = lam,
+    median = lam * log(2)^(1 / k),
+    p0_no_goal = exp(-(C / lam)^k),
+    mean = lam * gamma(1 + 1 / k))
+}
+fit_weib <- function(t, delta, C) {
+  mle <- mle_weibull(t, delta); eta <- log(mle)
+  V <- solve(optimHess(eta, nll_weibull, t = t, delta = delta))
+  J <- num_jac(function(e) g_fun(e, C), eta)
+  est <- g_fun(eta, C)
+  list(table = data.frame(parameter = names(est), estimate = unname(est),
+                          se = sqrt(diag(J %*% V %*% t(J))), row.names = NULL),
+       eta = eta, V = V, loglik = -nll_weibull(eta, t, delta))
+}
+```
+
+## Properties by simulation
+
+We fix the true parameters at the estimates from the real data, simulate $B$ samples for several sample sizes $n$ (including the real $n$), apply the same censoring at $C$, and compute the estimators. For each estimator we estimate the bias, the standard deviation, and the MSE $=\text{bias}^2+\text{Var}$.
+
+```{r simulation}
+k0 <- unname(mle["k"]); lam0 <- unname(mle["lambda"])
+
+sim_weibull <- function(n, k, lam, C) {
+  x <- rweibull(n, k, lam)
+  list(t = pmin(x, C), delta = as.integer(x <= C))
+}
+safe <- function(f, t, delta) tryCatch(f(t, delta), error = function(e) c(k = NA, lambda = NA))
+
+n_grid <- sort(unique(c(10, 30, 100, 500, n)))
+est_names <- c("MLE", "MoM_naive", "WeibullPlot")
+
+sim_one <- function(nn) {
+  out <- matrix(NA_real_, B_SIM, 6)
+  for (b in 1:B_SIM) {
+    s <- sim_weibull(nn, k0, lam0, C_MAX)
+    if (sum(s$delta) < 3) next
+    out[b, ] <- c(safe(mle_weibull, s$t, s$delta),
+                  safe(mom_weibull, s$t, s$delta),
+                  safe(wp_weibull, s$t, s$delta))
+  }
+  colnames(out) <- c("k_MLE", "lam_MLE", "k_MoM_naive", "lam_MoM_naive", "k_WeibullPlot", "lam_WeibullPlot")
+  out
+}
+sim <- lapply(n_grid, sim_one); names(sim) <- n_grid
+
+summ <- do.call(rbind, lapply(as.character(n_grid), function(nn) {
+  do.call(rbind, lapply(est_names, function(en) {
+    do.call(rbind, lapply(c(k = "k", lambda = "lam"), function(pn) {
+      x <- sim[[nn]][, paste0(pn, "_", en)]
+      true <- if (pn == "k") k0 else lam0
+      x <- x[is.finite(x)]
+      data.frame(n = as.integer(nn), estimator = en,
+                 parameter = ifelse(pn == "k", "k", "lambda"),
+                 bias = mean(x) - true, sd = sd(x),
+                 MSE = mean((x - true)^2),
+                 mean_ratio = mean(x) / true, n_valid = length(x))
+    }))
+  }))
+}))
+rownames(summ) <- NULL
+knitr::kable(summ, digits = 4)
+```
+
+```{r sim-plots, fig.width=9, fig.height=7}
+cols <- c(MLE = "red", MoM_naive = "blue", WeibullPlot = "darkgreen")
+par(mfrow = c(2, 2))
+for (pn in c("k", "lambda")) {
+  s1 <- summ[summ$parameter == pn, ]
+  plot(NA, xlim = range(n_grid), ylim = range(abs(s1$bias)[abs(s1$bias) > 0]), log = "xy",
+       xlab = "n", ylab = "|bias|", main = paste("|Bias| of the estimators of", pn))
+  for (en in est_names) { z <- s1[s1$estimator == en, ]; lines(z$n, abs(z$bias), type = "b", col = cols[en], pch = 16) }
+  legend("bottomleft", est_names, col = cols, pch = 16, lty = 1, cex = 0.8)
+  plot(NA, xlim = range(n_grid), ylim = range(sqrt(s1$MSE)), log = "xy",
+       xlab = "n", ylab = "RMSE", main = paste("RMSE of the estimators of", pn))
+  for (en in est_names) { z <- s1[s1$estimator == en, ]; lines(z$n, sqrt(z$MSE), type = "b", col = cols[en], pch = 16) }
+}
+par(mfrow = c(1, 1))
+```
+
+**Comparison of the simulated SD of the MLE with the asymptotic theory.** The expected information per observation, $I_1$, is approximated by the Hessian of the negative log-likelihood at the true parameters for a very large simulated sample. Then $\text{sd}(\hat\eta)\approx\sqrt{(I_1^{-1})_{jj}/n}$, and by the delta method $\text{sd}(\hat k)\approx k\,\text{sd}(\hat\eta_1)$, $\text{sd}(\hat\lambda)\approx\lambda\,\text{sd}(\hat\eta_2)$.
+
+```{r asymptotic-check}
+big <- sim_weibull(2e5, k0, lam0, C_MAX)
+I1 <- optimHess(log(c(k0, lam0)), nll_weibull, t = big$t, delta = big$delta) / 2e5
+V1 <- solve(I1)
+asym <- data.frame(n = n_grid,
+                   asym_sd_k = k0 * sqrt(V1[1, 1] / n_grid),
+                   asym_sd_lambda = lam0 * sqrt(V1[2, 2] / n_grid))
+emp <- summ[summ$estimator == "MLE", ]
+asym$sim_sd_k <- emp$sd[emp$parameter == "k"]
+asym$sim_sd_lambda <- emp$sd[emp$parameter == "lambda"]
+knitr::kable(asym, digits = 4)
+```
+
+**Bias and a possible correction.** If the bias of the MLE is roughly proportional to the parameter and to $1/n$, the ratio `mean_ratio` $=E[\hat\theta]/\theta$ is about $1+c/n$, and a simple corrected estimator is $\hat\theta/(1+c/n)$. Look at the column `mean_ratio` in the table above and at $n\times\text{bias}$ to decide whether such a correction is worth it.
+
+```{r bias-n}
+b <- summ[summ$estimator == "MLE", c("n", "parameter", "bias", "mean_ratio")]
+b$n_times_bias <- b$n * b$bias
+knitr::kable(b, digits = 4)
+```
+
+## Estimates from the real data, standard errors and conclusions
+
+```{r estimates}
+fw <- fit_weib(dat$t, dat$delta, C_MAX)
+knitr::kable(fw$table, digits = 4)
+```
+
+* $\hat k$ and $\hat\lambda$ are the MLEs; the median, $p_0$ and the mean are functions of them, and their standard errors come from the delta method.
+* The standard error of $\hat p_0$ can be compared with the simple binomial estimate $\sqrt{\hat p(1-\hat p)/n}$ of the proportion of goal-less matches, $\hat p=$ `r sprintf("%.4f", (n-d)/n)`, which is a model-free check (this proportion also contains the few matches whose first goal came in stoppage time).
+
+```{r checks-p0}
+p_emp <- (n - d) / n
+data.frame(empirical_p0 = p_emp, binomial_se = sqrt(p_emp * (1 - p_emp) / n),
+           weibull_p0 = fw$table$estimate[4], weibull_se = fw$table$se[4])
+```
+
+```{r wald}
+z_k <- (fw$table$estimate[1] - 1) / fw$table$se[1]
+data.frame(z = z_k, p_value_two_sided = 2 * pnorm(-abs(z_k)))
+```
+
+```{r by-season}
+by_season <- do.call(rbind, lapply(sort(unique(dat$season)), function(s) {
+  x <- dat[dat$season == s, ]
+  f <- fit_weib(x$t, x$delta, C_MAX)$table
+  data.frame(season = s, n = nrow(x), d = sum(x$delta),
+             k = f$estimate[1], se_k = f$se[1], lambda = f$estimate[2], se_lambda = f$se[2],
+             median = f$estimate[3])
+}))
+knitr::kable(by_season, digits = 3)
+```
+
+```{r other-leagues}
+# Optional extension: the same analysis for other leagues with at least 1000 matches
+cnt <- table(raw$league[grepl("-", raw$season)])
+big_leagues <- names(cnt)[cnt >= 1000]
+lg <- do.call(rbind, lapply(big_leagues, function(L) {
+  x <- make_data(raw[raw$league == L & grepl("-", raw$season), ], C_MAX)
+  f <- tryCatch(fit_weib(x$t, x$delta, C_MAX)$table, error = function(e) NULL)
+  if (is.null(f)) return(NULL)
+  data.frame(league = L, country = raw$country[raw$league == L][1], n = nrow(x),
+             k = f$estimate[1], se_k = f$se[1], lambda = f$estimate[2], median = f$estimate[3])
+}))
+lg[order(lg$k), ]
+```
+
+### Interpretation (to be completed by the group after running the code)
+
+* **Shape.** $\hat k=$ `r sprintf("%.3f", fw$table$estimate[1])` (se `r sprintf("%.3f", fw$table$se[1])`). Compare it with 1: the LRT and the Wald test above say whether the scoring rate is constant. $\hat k>1$ means that the rate of the first goal increases as the match goes on.
+* **Median.** Half of the matches have their first goal before about minute `r sprintf("%.1f", fw$table$estimate[3])` (se `r sprintf("%.1f", fw$table$se[3])`).
+* **No-goal probability.** About `r sprintf("%.1f", 100 * fw$table$estimate[4])`% of the matches are expected to have no goal in regulation time.
+* **Model fit.** *(Discuss the KM plot, Weibull plot, QQ plot and the AIC table: which model is best, and where the Weibull deviates, e.g. the stoppage-time bump after minute 45.)*
+* **Estimators.** *(Compare MLE, naive MoM and the Weibull-plot estimator using the simulation: bias, SD, RMSE. Which one do you recommend and why? Expected: the MLE, since the naive MoM ignores the censoring.)*
+* **Limitations.** i.i.d. assumption (team strengths differ, matches of the same team are dependent), integer-minute rounding, stoppage-time handling, one league only.
+
+# Session information
+
+```{r session}
+sessionInfo()
+```
