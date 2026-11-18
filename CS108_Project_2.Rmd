@@ -1,0 +1,725 @@
+---
+title: "When Does the First Goal Happen?"
+subtitle: "CS 108 Statistics — Project 2"
+output:
+  html_document:
+    toc: false
+    number_sections: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# 1. Problem Description
+
+**Research question: When does the first goal happen in a football match?**
+
+Let $T$ be the time (in minutes) from the start of a match until its first goal. We want to model the distribution of $T$ and use it to estimate the **median first-goal time** and probabilities such as $P(T\leq 30)$, the probability that the first goal occurs by minute 30.
+
+We consider Weibull and Gamma distributions as possible models for first-goal times. We will compare them using the observed data before selecting one for parameter estimation and confidence intervals.
+
+We use historical English Premier League match records from the 2023–2024, 2024–2025 and 2025–2026 seasons. Each match is one observation. We study first-goal times recorded **up to minute 90**. For matches with no first goal by this cutoff, the exact waiting time is not observed; we treat these observations as **right-censored at 90 minutes**.
+
+We initially treat the matches as independent and identically distributed (IID). This is an approximation because teams appear in multiple matches and goal-scoring patterns can differ between teams and seasons. We will assess the suitability of the models in Section 4.
+
+
+# 2. Choice of the Model
+
+We consider two distributions for modeling the waiting time until the first goal: the **Weibull distribution** and the **Gamma distribution**. Both are continuous distributions defined for positive values, making them possible models for waiting times.
+
+## 2.1. Weibull Distribution
+
+Let $T$ be the time until the first goal. We first consider
+
+$$
+T\sim\operatorname{Weibull}(k,\lambda),
+$$
+
+where:
+
+- $k>0$ is the **shape parameter**.
+- $\lambda>0$ is the **scale parameter**, measured in minutes.
+
+The support is $t>0$.
+
+The probability density function (PDF) is
+
+$$
+f(t;k,\lambda)=
+\begin{cases}
+\displaystyle \frac{k}{\lambda}
+\left(\frac{t}{\lambda}\right)^{k-1}
+e^{-(t/\lambda)^k},&t>0,\\
+0,&t\leq0.
+\end{cases}
+$$
+
+The cumulative distribution function (CDF) is
+
+$$
+F(t)=P(T\leq t)=1-e^{-(t/\lambda)^k},
+\qquad t\geq0.
+$$
+
+The survival function is
+
+$$
+S(t)=P(T>t)=e^{-(t/\lambda)^k},
+\qquad t\geq0.
+$$
+
+The **mean** and **variance** are
+
+$$
+E(T)=\lambda\Gamma\left(1+\frac1k\right),
+$$
+
+$$
+\operatorname{Var}(T)=\lambda^2
+\left[
+\Gamma\left(1+\frac2k\right)
+-\Gamma^2\left(1+\frac1k\right)
+\right].
+$$
+
+The **median** is
+
+$$
+m=\lambda(\ln2)^{1/k}.
+$$
+
+Here, $\Gamma$ denotes the Gamma function, which extends the factorial function to non-integer values.
+
+**Justification:** The Weibull distribution is commonly used to model waiting times. Its shape parameter allows the rate at which an event occurs to increase, decrease, or remain constant over time. This makes it a reasonable candidate for modeling first-goal times in football matches.
+
+## 2.2. Gamma Distribution
+
+As a competing model, we consider
+
+$$
+T\sim\operatorname{Gamma}(\alpha,\theta),
+$$
+
+where:
+
+- $\alpha>0$ is the **shape parameter**.
+- $\theta>0$ is the **scale parameter**, measured in minutes.
+
+The support is $t>0$.
+
+The probability density function (PDF) is
+
+$$
+f(t;\alpha,\theta)=
+\begin{cases}
+\displaystyle
+\frac{t^{\alpha-1}e^{-t/\theta}}
+{\Gamma(\alpha)\theta^\alpha},&t>0,\\
+0,&t\leq0.
+\end{cases}
+$$
+
+The cumulative distribution function (CDF) is
+
+$$
+F(t)=P(T\leq t)
+=\frac{1}{\Gamma(\alpha)\theta^\alpha}
+\int_0^t u^{\alpha-1}e^{-u/\theta}\,du,
+\qquad t\geq0.
+$$
+
+The survival function is
+
+$$
+S(t)=P(T>t)=1-F(t).
+$$
+
+The **mean** and **variance** are
+
+$$
+E(T)=\alpha\theta,
+$$
+
+$$
+\operatorname{Var}(T)=\alpha\theta^2.
+$$
+
+The **median** does not have a simple closed-form formula. It is the value $m$ satisfying
+
+$$
+F(m)=0.5,
+$$
+
+and can be calculated numerically.
+
+**Justification:** The Gamma distribution is also used to model positive waiting times. It can represent different degrees of skewness depending on its shape parameter. Since first-goal times are positive and may have a right-skewed distribution, Gamma is another reasonable candidate.
+
+## 2.3. Model Comparison
+
+Both Weibull and Gamma have two parameters and can describe different patterns of positive waiting times. However, we do not know which distribution better represents our football data.
+
+In Step 4, we will estimate the parameters of both models using the observed data, accounting for right-censored matches. We will then compare their fitted distributions with the data using graphical methods, such as histograms with fitted densities and QQ plots.
+
+Based on these comparisons, we will choose the model that better describes the observed first-goal times for the subsequent estimation and confidence interval analysis.
+
+
+
+# 3. Dataset Selection
+
+## 3.1. Dataset Description
+
+We use the **Football Charts — Match Results and Goal Timing** dataset, available at [Hugging Face](https://huggingface.co/datasets/Damir81/football-charts-results-goal-timing). We analyze the English Premier League matches in the three seasons 2023–2024, 2024–2025 and 2025–2026.
+
+One row represents one football match. The variables needed for our analysis are:
+
+| Variable | Meaning |
+|:--|:--|
+| `league`, `season` | Identify the league and season |
+| `match_date`, `home_team`, `away_team` | Identify each match |
+| `home_goals`, `away_goals`, `total_goals` | Final score and total number of goals |
+| `first_goal_time` | Recorded minute of the first goal; missing if the match ends 0–0 |
+
+Goal times are recorded as **whole-number minutes**. Stoppage-time conventions and the halftime break mean these numbers are only approximate representations of continuous playing time.
+
+## 3.2. Data Preparation
+
+We import the CSV file in R, select the three seasons, and check for missing or inconsistent values before using the data.
+
+```{r import-data}
+raw <- read.csv("football_charts_matches.csv", stringsAsFactors = FALSE)
+
+needed <- c("league", "season", "match_date", "home_team", "away_team",
+            "home_goals", "away_goals", "total_goals", "first_goal_time")
+if (!all(needed %in% names(raw))) {
+  stop("Required columns are missing from the CSV file.")
+}
+
+seasons <- c("2023-2024", "2024-2025", "2025-2026")
+matches <- subset(raw, league == "premier" & season %in% seasons)
+if (nrow(matches) == 0) stop("No Premier League matches were selected.")
+
+season_counts <- as.data.frame(table(matches$season))
+names(season_counts) <- c("Season", "Matches")
+knitr::kable(season_counts, caption = "Number of selected matches by season")
+```
+
+We check that matches are not duplicated, that final scores are consistent, and that the first-goal times are valid. Missing `first_goal_time` values are expected for 0–0 matches and are not treated as errors.
+
+```{r check-data}
+duplicate_matches <- sum(duplicated(matches[c("season", "match_date",
+                                             "home_team", "away_team")]))
+missing_details <- sum(!complete.cases(matches[c("season", "match_date",
+                                                "home_team", "away_team",
+                                                "home_goals", "away_goals",
+                                                "total_goals")]))
+score_errors <- sum(matches$total_goals != matches$home_goals +
+                    matches$away_goals, na.rm = TRUE)
+missing_goal_times <- sum(matches$total_goals > 0 &
+                          is.na(matches$first_goal_time))
+unexpected_goal_times <- sum(matches$total_goals == 0 &
+                             !is.na(matches$first_goal_time))
+invalid_goal_times <- sum(!is.na(matches$first_goal_time) &
+                          (matches$first_goal_time <= 0 |
+                           matches$first_goal_time != floor(matches$first_goal_time)))
+
+checks <- data.frame(
+  Check = c("Duplicate matches", "Missing match details or scores",
+            "Inconsistent final scores", "Missing first-goal time despite goals",
+            "First-goal time recorded for a 0-0 match",
+            "Invalid first-goal minutes"),
+  Count = c(duplicate_matches, missing_details, score_errors,
+            missing_goal_times, unexpected_goal_times, invalid_goal_times)
+)
+knitr::kable(checks, caption = "Data quality checks")
+if (any(checks$Count > 0)) {
+  stop("Data quality issue detected. Check the rows before continuing.")
+}
+```
+
+We use a fixed cutoff of **90 recorded minutes**. For each match, define
+
+$$
+Y_i=\min(T_i,90),\qquad
+\delta_i=\begin{cases}
+1,&\text{if the first goal is recorded by minute 90},\\
+0,&\text{otherwise}.
+\end{cases}
+$$
+
+Here $Y_i$ is the observed time and $\delta_i$ indicates whether we observed the first goal. A match ending 0–0 and a match whose first goal is recorded after minute 90 both have $Y_i=90$ and $\delta_i=0$. We **keep** these matches because they tell us that no first goal occurred within our observation window.
+
+```{r prepare-observations}
+cutoff <- 90
+observed_goal <- !is.na(matches$first_goal_time) &
+                 matches$first_goal_time <= cutoff
+
+football <- data.frame(
+  y = ifelse(observed_goal, matches$first_goal_time, cutoff),
+  delta = as.integer(observed_goal)
+)
+
+summary_table <- data.frame(
+  Quantity = c("Total matches", "First goal recorded by minute 90",
+               "Matches ending 0-0", "First goal recorded after minute 90",
+               "Right-censored observations"),
+  Count = c(nrow(matches), sum(football$delta),
+            sum(matches$total_goals == 0),
+            sum(!is.na(matches$first_goal_time) &
+                matches$first_goal_time > cutoff),
+            sum(football$delta == 0))
+)
+knitr::kable(summary_table, caption = "Prepared observations")
+```
+
+We did not remove any of the selected matches. The 0–0 matches and matches with a first goal recorded after minute 90 are retained as censored observations. Our analysis therefore uses **`r nrow(football)` matches** in total, including **`r sum(football$delta == 0)` right-censored observations**.
+
+
+
+
+# 4. Relevance of the Dataset to the Models
+
+We now check whether the Weibull and Gamma distributions describe the observed first-goal times reasonably well. We will fit both models, compare their predictions with the data, and perform a goodness-of-fit test.
+
+## 4.1. Fitting the Distributions
+
+To compare the distributions with our data, we first need to estimate their parameters. We use maximum likelihood estimation (MLE), taking into account matches with no first goal by minute 90. The function below performs this calculation for both distributions. We will derive and study the estimators in Step 5.
+
+```{r fit-models}
+# This step uses football$y, football$delta and cutoff from Step 3.
+
+fit_model <- function(model, dat) {
+  y <- dat$y
+  event <- dat$delta == 1
+  event_mean <- mean(y[event])
+
+  neg_loglik <- function(log_par) {
+    shape <- exp(log_par[1])
+    scale <- exp(log_par[2])
+    if (!is.finite(shape) || !is.finite(scale) ||
+        shape <= 0 || scale <= 0) return(1e100)
+
+    if (model == "Weibull") {
+      log_event <- dweibull(y[event], shape = shape, scale = scale,
+                            log = TRUE)
+      log_censored <- pweibull(y[!event], shape = shape, scale = scale,
+                               lower.tail = FALSE, log.p = TRUE)
+    } else {
+      log_event <- dgamma(y[event], shape = shape, scale = scale,
+                          log = TRUE)
+      log_censored <- pgamma(y[!event], shape = shape, scale = scale,
+                             lower.tail = FALSE, log.p = TRUE)
+    }
+
+    result <- -sum(c(log_event, log_censored))
+    if (!is.finite(result)) return(1e100)
+    result
+  }
+
+  if (model == "Weibull") {
+    start <- log(c(1.2, event_mean))
+  } else {
+    start <- log(c(1.3, event_mean / 1.3))
+  }
+
+  result <- optim(start, neg_loglik, method = "BFGS",
+                  control = list(maxit = 2000, reltol = 1e-9))
+
+  if (result$convergence != 0 || !is.finite(result$value)) {
+    result <- optim(result$par, neg_loglik, method = "Nelder-Mead",
+                    control = list(maxit = 4000, reltol = 1e-9))
+  }
+  if (result$convergence != 0 || !is.finite(result$value)) {
+    stop(paste("Optimization did not converge for", model))
+  }
+
+  c(shape = unname(exp(result$par[1])),
+    scale = unname(exp(result$par[2])))
+}
+
+# The same distribution functions are used in all graphs and tests.
+model_pdf <- function(t, model, par) {
+  if (model == "Weibull") {
+    dweibull(t, shape = par["shape"], scale = par["scale"])
+  } else {
+    dgamma(t, shape = par["shape"], scale = par["scale"])
+  }
+}
+
+model_cdf <- function(t, model, par) {
+  if (model == "Weibull") {
+    pweibull(t, shape = par["shape"], scale = par["scale"])
+  } else {
+    pgamma(t, shape = par["shape"], scale = par["scale"])
+  }
+}
+
+model_quantile <- function(p, model, par) {
+  if (model == "Weibull") {
+    qweibull(p, shape = par["shape"], scale = par["scale"])
+  } else {
+    qgamma(p, shape = par["shape"], scale = par["scale"])
+  }
+}
+
+weibull_fit <- fit_model("Weibull", football)
+gamma_fit   <- fit_model("Gamma", football)
+
+estimates <- data.frame(
+  Model = c("Weibull", "Gamma"),
+  Shape = c(unname(weibull_fit["shape"]), unname(gamma_fit["shape"])),
+  Scale_minutes = c(unname(weibull_fit["scale"]), unname(gamma_fit["scale"]))
+)
+knitr::kable(estimates, digits = 3,
+             caption = "Parameter estimates from the censored data")
+```
+
+## 4.2. Histogram with Fitted Densities
+
+The histogram shows the distribution of first-goal minutes **among matches with a first goal observed by minute 90**. Since these are only the observed events, we must compare them with the model densities conditional on $T\leq 90$, rather than the full densities:
+
+$$
+f(t\mid T\leq90)=\frac{f(t)}{F(90)},\qquad 0<t\leq90.
+$$
+
+```{r histogram-fit, fig.width=7, fig.height=4}
+hist(matches$first_goal_time[
+       !is.na(matches$first_goal_time) &
+       matches$first_goal_time <= cutoff
+     ],
+     breaks = seq(0, cutoff, by = 5),
+     probability = TRUE, col = "grey85", border = "white",
+     xlab = "Minute of the first goal", ylab = "Density",
+     main = "First-goal times and fitted distributions")
+
+times <- seq(0.01, cutoff, length.out = 500)
+
+weibull_cond <- model_pdf(times, "Weibull", weibull_fit) /
+                model_cdf(cutoff, "Weibull", weibull_fit)
+gamma_cond <- model_pdf(times, "Gamma", gamma_fit) /
+              model_cdf(cutoff, "Gamma", gamma_fit)
+
+lines(times, weibull_cond, col = "blue", lwd = 2)
+lines(times, gamma_cond, col = "red", lwd = 2, lty = 2)
+legend("topright", legend = c("Weibull", "Gamma"),
+       col = c("blue", "red"), lwd = 2, lty = c(1, 2), bty = "n")
+```
+
+A fitted density that follows the histogram more closely gives a better visual description of the observed goal times. This comparison alone does not account for how many matches had no first goal by minute 90; we check those matches in the survival curves and the test below.
+
+## 4.3. QQ Plots
+
+QQ plots compare the ordered observed goal times with the quantiles predicted by each model. Because the plotted matches had a first goal by minute 90, we use quantiles of the distributions **conditional on $T\leq90$**. If a model fits well, its points should lie approximately along the diagonal.
+
+```{r qq-plots, fig.width=8, fig.height=4}
+observed_q <- sort(matches$first_goal_time[
+  !is.na(matches$first_goal_time) &
+  matches$first_goal_time <= cutoff
+])
+p <- (seq_along(observed_q) - 0.5) / length(observed_q)
+
+par(mfrow = c(1, 2), mar = c(4, 4, 3, 1))
+for (model in c("Weibull", "Gamma")) {
+  fit <- if (model == "Weibull") weibull_fit else gamma_fit
+  conditional_p <- p * model_cdf(cutoff, model, fit)
+  theoretical_q <- model_quantile(conditional_p, model, fit)
+
+  plot(theoretical_q, observed_q, pch = 16, cex = 0.35,
+       xlab = "Theoretical quantiles (minutes)",
+       ylab = "Observed quantiles (minutes)",
+       main = paste(model, "QQ plot"), xlim = c(0, 90), ylim = c(0, 90))
+  abline(0, 1, col = "red", lwd = 2)
+}
+par(mfrow = c(1, 1))
+```
+
+Systematic curvature or large departures from the diagonal suggest that the model does not reproduce some parts of the observed first-goal distribution well.
+
+
+
+## 4.4. Chi-Square Goodness-of-Fit Tests
+
+We test the two distributions separately. For each model:
+
+- **$H_0$:** First-goal waiting times follow the proposed distribution (with some values of its parameters).
+- **$H_1$:** First-goal waiting times do not follow that distribution.
+
+We group observed first goals into 15-minute intervals and put all matches without a first goal by minute 90 into one additional category. The Pearson chi-square statistic is
+
+$$
+X^2=\sum_{j=1}^{7}\frac{(O_j-E_j)^2}{E_j},
+$$
+
+where $O_j$ and $E_j$ are the observed and model-expected numbers of matches in category $j$. A larger value indicates a larger discrepancy.
+
+Because we estimate the parameters from the data, we calculate p-values by simulation rather than using a standard chi-square reference table. We simulate datasets from each fitted model, re-estimate its parameters, and calculate the statistic again. The p-value is the proportion of simulated statistics at least as large as the observed statistic (with a small correction).
+
+```{r goodness-of-fit}
+intervals <- seq(0, cutoff, by = 15)
+
+observed_counts <- function(dat) {
+  group <- cut(dat$y[dat$delta == 1], breaks = intervals,
+               include.lowest = TRUE, right = TRUE)
+  c(tabulate(as.integer(group), nbins = length(intervals) - 1),
+    sum(dat$delta == 0))
+}
+
+expected_counts <- function(model, fit, n) {
+  probabilities <- c(diff(model_cdf(intervals, model, fit)),
+                     1 - model_cdf(cutoff, model, fit))
+  n * probabilities
+}
+
+chi_square_stat <- function(dat, model, fit) {
+  O <- observed_counts(dat)
+  E <- expected_counts(model, fit, nrow(dat))
+  if (any(E < 5)) stop("A category has fewer than 5 expected matches.")
+  sum((O - E)^2 / E)
+}
+
+# Compare observed and expected counts in each category.
+category_names <- c(paste(head(intervals, -1), tail(intervals, -1),
+                          sep = "-"), "No first goal by 90")
+counts_table <- data.frame(
+  Category = category_names,
+  Observed = observed_counts(football),
+  Weibull_expected = expected_counts("Weibull", weibull_fit, nrow(football)),
+  Gamma_expected = expected_counts("Gamma", gamma_fit, nrow(football))
+)
+knitr::kable(counts_table, digits = 1,
+             caption = "Observed and expected match counts")
+
+simulate_matches <- function(model, fit, n) {
+  if (model == "Weibull") {
+    T <- rweibull(n, shape = fit["shape"], scale = fit["scale"])
+  } else {
+    T <- rgamma(n, shape = fit["shape"], scale = fit["scale"])
+  }
+  data.frame(y = pmin(T, cutoff), delta = as.integer(T <= cutoff))
+}
+
+gof_test <- function(model, fit, B = 499) {
+  observed_stat <- chi_square_stat(football, model, fit)
+  simulated_stat <- numeric(B)
+
+  for (b in seq_len(B)) {
+    simulated_data <- simulate_matches(model, fit, nrow(football))
+    simulated_fit <- fit_model(model, simulated_data)
+    simulated_stat[b] <- chi_square_stat(simulated_data, model, simulated_fit)
+  }
+
+  p_value <- (1 + sum(simulated_stat >= observed_stat)) / (B + 1)
+  c(statistic = observed_stat, p_value = p_value)
+}
+
+set.seed(108)
+weibull_test <- gof_test("Weibull", weibull_fit)
+gamma_test <- gof_test("Gamma", gamma_fit)
+
+test_results <- data.frame(
+  Model = c("Weibull", "Gamma"),
+  Chi_square = c(unname(weibull_test["statistic"]),
+                 unname(gamma_test["statistic"])),
+  Bootstrap_p_value = c(unname(weibull_test["p_value"]),
+                        unname(gamma_test["p_value"]))
+)
+test_results$Conclusion_5pct <- ifelse(
+  test_results$Bootstrap_p_value < 0.05,
+  "Reject H0", "Do not reject H0"
+)
+knitr::kable(test_results, digits = 3,
+             caption = "Goodness-of-fit tests at the 5% significance level")
+```
+
+We use a significance level of $\alpha=0.05$. A p-value below 0.05 is evidence against that distribution. A p-value above 0.05 means we do not have sufficient evidence to reject it; it does **not** prove that the model is correct. The two p-values should not be treated as a ranking of the models.
+
+We will compare the graphical results and the goodness-of-fit tests before choosing a model for the estimation and confidence interval analysis in the next steps. These checks apply to the first 90 recorded minutes, not to waiting times beyond the observed window.
+
+
+
+
+
+# 5. Estimators and Their Properties
+
+We now focus on the **Weibull model** for the rest of the project, assuming that the comparisons in Step 4 support this choice. We do not need to fit the model again: `weibull_fit` and the function `fit_model()` were already created in Step 4.
+
+Our main quantity of interest is the **median first-goal time**. We also estimate the probability that the first goal occurs by minute 30.
+
+## 5.1. Constructing the Estimators
+
+We use **maximum likelihood estimation (MLE)**. For matches with a first goal by minute 90, we use the Weibull density. For matches without a first goal by minute 90, we use the probability of surviving without a goal until minute 90.
+
+Let $y_i$ be the observed time (capped at 90), let $\delta_i$ be 1 if the first goal was observed by minute 90 and 0 otherwise, and let $d=\sum_{i=1}^n\delta_i$ be the number of observed first goals.
+
+The likelihood is
+
+$$
+L(k,\lambda)=\prod_{i=1}^{n}f(y_i;k,\lambda)^{\delta_i}S(y_i;k,\lambda)^{1-\delta_i}.
+$$
+
+Using the Weibull PDF and survival function from Step 2, the log-likelihood becomes
+
+$$
+\ell(k,\lambda)=d\ln k-dk\ln\lambda
++(k-1)\sum_{i:\delta_i=1}\ln y_i
+-\sum_{i=1}^{n}\left(\frac{y_i}{\lambda}\right)^k.
+$$
+
+Setting its derivatives equal to zero gives
+
+$$
+\hat\lambda=
+\left(\frac{\sum_{i=1}^{n}y_i^{\hat k}}{d}\right)^{1/\hat k}
+$$
+
+and the equation for $\hat k$:
+
+$$
+\frac{1}{\hat k}
++\frac{1}{d}\sum_{i:\delta_i=1}\ln y_i
+-\frac{\sum_{i=1}^{n}y_i^{\hat k}\ln y_i}
+{\sum_{i=1}^{n}y_i^{\hat k}}=0.
+$$
+
+This equation does not have a simple closed-form solution. In Step 4, `optim()` found the estimates numerically by minimizing the negative log-likelihood. Here, we check that the resulting estimates approximately satisfy the equations above.
+
+```{r check-mle}
+k_hat <- unname(weibull_fit["shape"])
+lambda_hat <- unname(weibull_fit["scale"])
+
+y <- football$y
+event <- football$delta == 1
+d <- sum(event)
+
+shape_residual <- 1 / k_hat + mean(log(y[event])) -
+  sum(y^k_hat * log(y)) / sum(y^k_hat)
+lambda_check <- (sum(y^k_hat) / d)^(1 / k_hat)
+
+checks_mle <- data.frame(
+  Check = c("Absolute shape-equation residual", "Difference in scale estimates"),
+  Value = c(abs(shape_residual), abs(lambda_hat - lambda_check))
+)
+knitr::kable(checks_mle, digits = 7,
+             caption = "Checking the numerical MLE solution")
+```
+
+Our estimates of the quantities we care about are obtained by substituting the estimated parameters into the Weibull formulas:
+
+$$
+\hat m=\hat\lambda(\ln 2)^{1/\hat k},
+\qquad
+\hat p_{30}=1-\exp\left[-\left(\frac{30}{\hat\lambda}\right)^{\hat k}\right].
+$$
+
+## 5.2. Standard Errors and Estimator Properties
+
+An estimator changes from sample to sample. Its **standard error** measures this sampling variability. We estimate standard errors using the curvature (Hessian) of the negative log-likelihood at the MLE. The parameters are handled on the logarithmic scale so that their values remain positive.
+
+The inverse Hessian approximates the covariance matrix of $(\ln\hat k,\ln\hat\lambda)$. We then use the **delta method** to obtain standard errors for $k$, $\lambda$, the median, and $P(T\leq30)$.
+
+```{r estimates-standard-errors}
+weibull_nll <- function(z) {
+  k <- exp(z[1])
+  lambda <- exp(z[2])
+  -sum(
+    football$delta * dweibull(football$y, shape = k, scale = lambda,
+                               log = TRUE) +
+    (1 - football$delta) * pweibull(football$y, shape = k, scale = lambda,
+                                    lower.tail = FALSE, log.p = TRUE)
+  )
+}
+
+H <- optimHess(log(c(k_hat, lambda_hat)), weibull_nll)
+V <- solve(H)
+
+se_k <- k_hat * sqrt(V[1, 1])
+se_lambda <- lambda_hat * sqrt(V[2, 2])
+
+median_hat <- lambda_hat * (log(2))^(1 / k_hat)
+median_gradient <- median_hat * c(-log(log(2)) / k_hat, 1)
+se_median <- sqrt(drop(t(median_gradient) %*% V %*% median_gradient))
+
+u <- (30 / lambda_hat)^k_hat
+p30_hat <- 1 - exp(-u)
+p30_gradient <- exp(-u) * u * c(k_hat * log(30 / lambda_hat), -k_hat)
+se_p30 <- sqrt(drop(t(p30_gradient) %*% V %*% p30_gradient))
+
+estimate_table <- data.frame(
+  Quantity = c("Shape k", "Scale lambda (minutes)",
+               "Median first-goal time (minutes)", "P(first goal by minute 30)"),
+  Estimate = c(k_hat, lambda_hat, median_hat, p30_hat),
+  Standard_error = c(se_k, se_lambda, se_median, se_p30)
+)
+knitr::kable(estimate_table, digits = 3,
+             caption = "Weibull point estimates and estimated standard errors")
+```
+
+For a correctly specified model with approximately IID observations, MLE is **consistent**: as the sample size increases, its estimates approach the true parameter values. Under regularity conditions, it is also approximately normally distributed and **asymptotically efficient** for large samples. These results do not mean that the estimators must be exactly unbiased or have minimum variance for a finite sample.
+
+We examine finite-sample **bias**, **variance**, and **mean squared error (MSE)** by simulation:
+
+$$
+\operatorname{Bias}(\hat\theta)=E(\hat\theta)-\theta,
+\qquad
+\operatorname{MSE}(\hat\theta)=\operatorname{Var}(\hat\theta)+\operatorname{Bias}(\hat\theta)^2.
+$$
+
+## 5.3. Simulation Study of Estimator Properties
+
+We treat the fitted Weibull parameters as the true values for a simulation experiment. For each sample size, we simulate first-goal times from Weibull, apply the same 90-minute cutoff as in the real dataset, and re-estimate the parameters and median. We repeat this 300 times for each sample size.
+
+```{r estimator-simulation}
+set.seed(108)
+
+B <- 300
+sample_sizes <- c(100, 500, nrow(football))
+true_values <- c(k_hat, lambda_hat, median_hat)
+quantity_names <- c("Shape k", "Scale lambda", "Median")
+
+simulation_results <- data.frame()
+
+for (n in sample_sizes) {
+  simulated_estimates <- matrix(NA_real_, nrow = B, ncol = 3)
+
+  for (b in seq_len(B)) {
+    T <- rweibull(n, shape = k_hat, scale = lambda_hat)
+    simulated_data <- data.frame(
+      y = pmin(T, cutoff),
+      delta = as.integer(T <= cutoff)
+    )
+
+    fit <- fit_model("Weibull", simulated_data)
+    simulated_estimates[b, ] <- c(
+      unname(fit["shape"]),
+      unname(fit["scale"]),
+      unname(fit["scale"] * (log(2))^(1 / fit["shape"]))
+    )
+  }
+
+  for (j in 1:3) {
+    values <- simulated_estimates[, j]
+    simulation_results <- rbind(simulation_results, data.frame(
+      Sample_size = n,
+      Quantity = quantity_names[j],
+      Bias = mean(values) - true_values[j],
+      Variance = var(values),
+      MSE = mean((values - true_values[j])^2)
+    ))
+  }
+}
+
+knitr::kable(simulation_results, digits = 3,
+             caption = "Simulated bias, variance, and MSE of the MLEs")
+```
+
+We look for decreasing variance and MSE as the sample size increases. The simulated bias may be positive or negative and need not decrease perfectly at every sample size because the experiment uses a finite number of repetitions. This simulation checks the estimators under our assumed Weibull model; it does not establish that the model is correct for real football matches.
+
+## 5.4. Interpretation of the Estimates
+
+Our estimated **median time until the first goal** is **`r round(median_hat, 1)` minutes**. Under the fitted Weibull model, half of matches would be expected to have had their first goal by about this time.
+
+The estimated probability of a first goal by minute 30 is **`r round(p30_hat, 3)`**, or approximately **`r round(100 * p30_hat, 1)`%**.
+
+The corresponding standard errors in the table indicate the uncertainty in these point estimates. These conclusions rely on the Weibull model and the assumption that matches can be treated as approximately independent. We will construct confidence intervals and check their coverage in Step 6.
+
+
